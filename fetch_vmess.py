@@ -10,10 +10,14 @@ GH = os.environ["GH_TOKEN"]
 COUNTRY = "2b54e231-bb62-4d5e-98e5-5a62b73b193f"
 
 HEADERS = {
-    "X-Device-Token": TOKEN
+    "X-Device-Token": TOKEN,
+    "User-Agent": "okhttp/4.12.0",
+    "Accept": "application/json",
+    "Connection": "Keep-Alive"
 }
 
-servers = requests.get(
+# Получаем список серверов
+resp = requests.get(
     "https://api.dvpnsdk.com/server",
     params={
         "country_id": COUNTRY,
@@ -21,17 +25,37 @@ servers = requests.get(
     },
     headers=HEADERS,
     timeout=30
-).json()["data"]
+)
+
+print("GET /server")
+print("Status:", resp.status_code)
+print(resp.text)
+
+resp.raise_for_status()
+
+servers = resp.json()["data"]
+
+print("Servers:", len(servers))
 
 links = []
 
 for s in servers:
+    print("GET", s["name"])
+
     try:
-        r = requests.post(
+        resp = requests.post(
             f"https://api.dvpnsdk.com/server/{s['id']}/credentials",
             headers=HEADERS,
             timeout=30
-        ).json()["data"]
+        )
+
+        print("Status:", resp.status_code)
+
+        if resp.status_code != 200:
+            print(resp.text)
+            continue
+
+        r = resp.json()["data"]
 
         hs = r["connection_handshake"]["response"]
 
@@ -59,11 +83,12 @@ for s in servers:
         print(link)
 
     except Exception as e:
-        print("ERROR:", s["name"], e)
+        print("ERROR:", s["name"])
+        print(e)
 
 text = "\n".join(links)
 
-requests.patch(
+resp = requests.patch(
     f"https://api.github.com/gists/{GIST}",
     headers={
         "Authorization": f"Bearer {GH}",
@@ -78,5 +103,8 @@ requests.patch(
     },
     timeout=30
 )
+
+print("Gist status:", resp.status_code)
+print(resp.text)
 
 print("Uploaded:", len(links))
