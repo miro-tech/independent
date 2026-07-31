@@ -2,6 +2,7 @@ import requests
 import base64
 import json
 import os
+import time
 
 TOKEN = os.environ["DEVICE_TOKEN"]
 GIST = os.environ["GIST_ID"]
@@ -9,67 +10,126 @@ GH = os.environ["GH_TOKEN"]
 
 COUNTRY = "2b54e231-bb62-4d5e-98e5-5a62b73b193f"
 
+
 HEADERS = {
     "X-Device-Token": TOKEN,
     "User-Agent": "okhttp/4.12.0",
-    "Accept": "application/json",
-    "Connection": "Keep-Alive"
+    "Accept": "application/json"
 }
 
-# Получаем список серверов
-resp = requests.get(
-    "https://api.dvpnsdk.com/server",
-    params={
-        "country_id": COUNTRY,
-        "filter": "V2RAY"
-    },
-    headers=HEADERS,
-    timeout=30
-)
 
-print("GET /server")
-print("Status:", resp.status_code)
-print(resp.text)
+# ==========================
+# Получение серверов с retry
+# ==========================
 
-resp.raise_for_status()
+servers = None
 
-servers = resp.json()["data"]
+for attempt in range(5):
+
+    try:
+        resp = requests.get(
+            "https://api.dvpnsdk.com/server",
+            params={
+                "country_id": COUNTRY,
+                "filter": "V2RAY"
+            },
+            headers=HEADERS,
+            timeout=60
+        )
+
+        print(
+            "GET /server",
+            "Attempt:",
+            attempt + 1,
+            "Status:",
+            resp.status_code
+        )
+
+        if resp.status_code == 200:
+            servers = resp.json()["data"]
+            break
+
+        else:
+            print(resp.text[:300])
+
+    except Exception as e:
+        print("REQUEST ERROR:", e)
+
+    time.sleep(10)
+
+
+if servers is None:
+    raise Exception("API unavailable")
+
 
 print("Servers:", len(servers))
 
+
+# ==========================
+# Создание VMess
+# ==========================
+
 links = []
 
+
 for s in servers:
-    print("GET", s["name"])
 
     try:
-        resp = requests.post(
+
+        print("GET:", s["name"])
+
+
+        r = requests.post(
             f"https://api.dvpnsdk.com/server/{s['id']}/credentials",
             headers=HEADERS,
-            timeout=30
+            timeout=60
         )
 
-        print("Status:", resp.status_code)
 
-        if resp.status_code != 200:
-            print(resp.text)
+        if r.status_code != 200:
+            print(
+                "Credential error:",
+                r.status_code,
+                r.text[:200]
+            )
             continue
 
-        r = resp.json()["data"]
 
-        hs = r["connection_handshake"]["response"]
+        data = r.json()["data"]
+
+
+        hs = data["connection_handshake"]["response"]
 
         ip = hs["addrs"][0]
 
+
         meta = json.loads(
-            base64.b64decode(hs["data"])
+            base64.b64decode(
+                hs["data"]
+            )
         )
 
-        port = meta["metadata"][0]["port"]
 
-        uid = r["uid"]
+        # берем первый grpc порт
+        port = None
 
-        link = (
+        for m in meta["metadata"]:
+
+            # transport_protocol 3 = grpc
+            if m.get("transport_protocol") == 3:
+                port = m["port"]
+                break
+
+
+        if port is None:
+            print("No grpc:", s["name"])
+            continue
+
+
+        uid = data["uid"]
+
+
+        vmess = (
             f"vmess://{uid}"
             f"@{ip}:{port}"
             f"?encryption=auto"
@@ -78,15 +138,27 @@ for s in servers:
             f"#{s['name']}"
         )
 
-        links.append(link)
 
-        print(link)
+        links.append(vmess)
+
+        print(vmess)
+
 
     except Exception as e:
-        print("ERROR:", s["name"])
-        print(e)
+
+        print(
+            "ERROR:",
+            s.get("name"),
+            e
+        )
+
+
+# ==========================
+# Загрузка в Gist
+# ==========================
 
 text = "\n".join(links)
+
 
 resp = requests.patch(
     f"https://api.github.com/gists/{GIST}",
@@ -101,10 +173,14 @@ resp = requests.patch(
             }
         }
     },
-    timeout=30
+    timeout=60
 )
 
-print("Gist status:", resp.status_code)
-print(resp.text)
 
-print("Uploaded:", len(links))
+if resp.status_code != 200:
+    print(resp.text)
+    raise Exception("Gist update failed")
+
+
+print()
+print("Uploaded
