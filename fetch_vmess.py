@@ -183,4 +183,4 @@ if resp.status_code != 200:
 
 
 print()
-print("Uploaded
+print("Uploaded:", len(links))
