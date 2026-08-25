@@ -8,7 +8,7 @@ TOKEN = os.environ["DEVICE_TOKEN"]
 GIST = os.environ["GIST_ID"]
 GH = os.environ["GH_TOKEN"]
 
-COUNTRY = "c2708a97-28a8-46ae-b705-1132b6ae450e"
+COUNTRY = "cb7b2d44-91a5-4dc0-8f5b-9d2e3f2ffb3b"
 
 
 HEADERS = {
