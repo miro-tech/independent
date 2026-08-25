@@ -10,6 +10,7 @@ GH = os.environ["GH_TOKEN"]
 
 COUNTRY = "cb7b2d44-91a5-4dc0-8f5b-9d2e3f2ffb3b"
 
+API = "https://api.dvpnsdk.com"
 
 HEADERS = {
     "X-Device-Token": TOKEN,
@@ -18,147 +19,373 @@ HEADERS = {
 }
 
 
-# ==========================
-# Получение серверов с retry
-# ==========================
+# ============================================================
+# GET SERVERS
+# Логика перенесена из PHP:
+#
+# offset=0,100,200...900
+# limit=100
+# filter=V2RAY
+# затем country_id == COUNTRY
+# ============================================================
 
-servers = None
+servers = []
+seen = set()
 
-for attempt in range(5):
+for offset in range(0, 1000, 100):
 
     try:
-        resp = requests.get(
-            "https://api.dvpnsdk.com/server",
+
+        print(
+            f"GET /server offset={offset}"
+        )
+
+        r = requests.get(
+            f"{API}/server",
             params={
-                "country_id": COUNTRY,
-                "filter": "V2RAY"
+                "filter": "V2RAY",
+                "offset": offset,
+                "limit": 100
             },
             headers=HEADERS,
             timeout=60
         )
 
         print(
-            "GET /server",
-            "Attempt:",
-            attempt + 1,
-            "Status:",
-            resp.status_code
+            "HTTP:",
+            r.status_code
         )
 
-        if resp.status_code == 200:
-            servers = resp.json()["data"]
+        if r.status_code != 200:
+            print(r.text[:500])
+            continue
+
+        data = r.json().get("data", [])
+
+        print(
+            "Received:",
+            len(data)
+        )
+
+        if not data:
             break
 
-        else:
-            print(resp.text[:300])
+        for s in data:
+
+            # PHP:
+            #
+            # if (
+            #     isset($s['country_id']) &&
+            #     $s['country_id'] === $country
+            # )
+
+            if s.get("country_id") != COUNTRY:
+                continue
+
+            sid = s.get("id")
+
+            if not sid:
+                continue
+
+            # Убираем дубли как PHP
+            if sid in seen:
+                continue
+
+            seen.add(sid)
+            servers.append(s)
 
     except Exception as e:
-        print("REQUEST ERROR:", e)
 
-    time.sleep(10)
+        print(
+            "SERVER REQUEST ERROR:",
+            e
+        )
+
+        continue
 
 
-if servers is None:
-    raise Exception("API unavailable")
-
-
+print()
 print("Servers:", len(servers))
+print()
 
 
-# ==========================
-# Создание VMess
-# ==========================
+if not servers:
+    raise Exception("Servers not found")
+
+
+# ============================================================
+# GET CREDENTIALS + BUILD VMESS
+# ============================================================
 
 links = []
 
 
 for s in servers:
 
+    name = s.get("name", "Unknown")
+    sid = s.get("id")
+
+    print("GET:", name)
+
     try:
 
-        print("GET:", s["name"])
-
+        # ====================================================
+        # POST /server/{id}/credentials
+        # ====================================================
 
         r = requests.post(
-            f"https://api.dvpnsdk.com/server/{s['id']}/credentials",
+            f"{API}/server/{sid}/credentials",
             headers=HEADERS,
             timeout=60
         )
 
-
         if r.status_code != 200:
+
             print(
                 "Credential error:",
                 r.status_code,
-                r.text[:200]
+                r.text[:300]
             )
+
             continue
 
 
-        data = r.json()["data"]
+        credentials = r.json()
 
 
-        hs = data["connection_handshake"]["response"]
+        # ====================================================
+        # data
+        # ====================================================
 
-        ip = hs["addrs"][0]
+        data = credentials.get("data")
+
+        if not data:
+            print("Invalid credentials response")
+            continue
 
 
-        meta = json.loads(
-            base64.b64decode(
-                hs["data"]
-            )
+        # ====================================================
+        # connection_handshake.response
+        # ====================================================
+
+        hs = (
+            data
+            .get("connection_handshake", {})
+            .get("response", {})
         )
 
+        if not hs:
+            print("No handshake response")
+            continue
 
-        # берем первый grpc порт
+
+        # ====================================================
+        # IP
+        #
+        # PHP:
+        #
+        # $ip = $hs['addrs'][0];
+        # ====================================================
+
+        addrs = hs.get("addrs", [])
+
+        if not addrs:
+
+            print("No addresses")
+            continue
+
+        ip = addrs[0]
+
+
+        # ====================================================
+        # handshake.data
+        #
+        # Base64 -> JSON
+        # ====================================================
+
+        handshake_data = hs.get("data")
+
+        if not handshake_data:
+
+            print("No handshake data")
+            continue
+
+
+        try:
+
+            decoded = base64.b64decode(
+                handshake_data,
+                validate=True
+            )
+
+        except Exception:
+
+            print("Base64 decode failed")
+            continue
+
+
+        try:
+
+            meta = json.loads(
+                decoded.decode("utf-8")
+            )
+
+        except Exception:
+
+            print("Invalid metadata JSON")
+            continue
+
+
+        metadata = meta.get("metadata")
+
+        if not isinstance(metadata, list):
+
+            print("Invalid metadata")
+            continue
+
+
+        # ====================================================
+        # Ищем gRPC
+        #
+        # PHP:
+        #
+        # transport_protocol == 3
+        # ====================================================
+
         port = None
 
-        for m in meta["metadata"]:
+        for m in metadata:
 
-            # transport_protocol 3 = grpc
-            if m.get("transport_protocol") == 3:
+            if (
+                m.get("transport_protocol") == 3
+                and m.get("port") is not None
+            ):
+
                 port = m["port"]
                 break
 
 
+        # ====================================================
+        # FALLBACK
+        #
+        # PHP:
+        #
+        # если grpc не найден,
+        # берётся metadata[0].port
+        # ====================================================
+
         if port is None:
-            print("No grpc:", s["name"])
+
+            if (
+                metadata
+                and metadata[0].get("port") is not None
+            ):
+
+                port = metadata[0]["port"]
+
+
+        if port is None:
+
+            print("No port")
             continue
 
 
-        uid = data["uid"]
+        # ====================================================
+        # UUID
+        # ====================================================
+
+        uid = data.get("uid")
+
+        if not uid:
+
+            print("No UID")
+            continue
 
 
-        vmess = (
-            f"vmess://{uid}"
-            f"@{ip}:{port}"
-            f"?encryption=auto"
-            f"&security=none"
-            f"&type=grpc"
-            f"#{s['name']}"
+        # ====================================================
+        # Старый VMess JSON
+        # ====================================================
+
+        vmess = {
+            "v": "2",
+            "ps": name,
+            "add": ip,
+            "port": str(port),
+            "id": uid,
+            "aid": "0",
+            "scy": "auto",
+
+            # ВАЖНО:
+            # это именно формат из PHP
+            "net": "grpc",
+            "type": "gun",
+
+            "host": "",
+            "path": "",
+
+            "tls": "",
+            "sni": "",
+            "alpn": "",
+            "fp": ""
+        }
+
+
+        # ====================================================
+        # JSON -> BASE64
+        # ====================================================
+
+        vmess_json = json.dumps(
+            vmess,
+            ensure_ascii=False,
+            separators=(",", ":")
         )
 
+        encoded = base64.b64encode(
+            vmess_json.encode("utf-8")
+        ).decode("ascii")
 
-        links.append(vmess)
 
-        print(vmess)
+        link = "vmess://" + encoded
+
+        links.append(link)
+
+
+        print("IP:   ", ip)
+        print("Port: ", port)
+        print("UUID: ", uid)
+        print("VMess:")
+        print(link)
+        print()
 
 
     except Exception as e:
 
         print(
             "ERROR:",
-            s.get("name"),
+            name,
             e
         )
 
 
-# ==========================
-# Загрузка в Gist
-# ==========================
+# ============================================================
+# RESULT
+# ============================================================
+
+print("========================================")
+print("Generated links:", len(links))
+print("========================================")
+
+
+if not links:
+    raise Exception("No VMess links generated")
+
 
 text = "\n".join(links)
 
+
+# ============================================================
+# GITHUB GIST
+# ============================================================
 
 resp = requests.patch(
     f"https://api.github.com/gists/{GIST}",
@@ -178,6 +405,7 @@ resp = requests.patch(
 
 
 if resp.status_code != 200:
+
     print(resp.text)
     raise Exception("Gist update failed")
 
